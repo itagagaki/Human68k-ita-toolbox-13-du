@@ -6,6 +6,9 @@
 * Itagaki Fumihiko 20-Jan-93  引数 - と -- の扱いの変更
 * Itagaki Fumihiko 22-Jan-93  スタックを拡張
 * 1.1
+* Itagaki Fumihiko 04-Jan-94  -B <size> は -B<size> と書いてもよい
+* Itagaki Fumihiko 04-Jan-94  \ が \/ と表示される不具合を修正
+* 1.2
 *
 * Usage: du [ -DLSacsx ] [ -B blocksize ] [ -- ] [ file ] ...
 
@@ -29,6 +32,7 @@
 .xref divul
 .xref strip_excessive_slashes
 .xref contains_dos_wildcard
+.xref skip_root
 
 REQUIRED_OSVER		equ	$200			*  2.00以降
 
@@ -181,12 +185,14 @@ bad_option_1:
 		bra	usage
 
 parse_blocksize:
-		tst.b	(a0)+
-		bne	bad_arg
+		tst.b	(a0)
+		bne	parse_blocksize_1
 
 		subq.l	#1,d7
 		bcs	too_few_args
 
+		addq.l	#1,a0
+parse_blocksize_1:
 		bsr	atou
 		bne	bad_blocksize
 
@@ -256,15 +262,11 @@ exit_program:
 
 bad_blocksize:
 		lea	msg_bad_blocksize(pc),a0
-		bra	bad_arg_1
+		bra	werror_usage
 
 too_few_args:
 		lea	msg_too_few_args(pc),a0
-		bra	bad_arg_1
-
-bad_arg:
-		lea	msg_bad_arg(pc),a0
-bad_arg_1:
+werror_usage:
 		bsr	werror_myname_and_msg
 usage:
 		lea	msg_usage(pc),a0
@@ -330,6 +332,13 @@ du_arg_dir:
 du_arg_dir_1:
 		lea	pathname(pc),a0
 		bsr	stpcpy
+		exg	a0,a1
+		bsr	skip_root
+		exg	a0,a1
+		beq	du_arg_dir_2
+
+		move.b	#'/',(a0)+
+du_arg_dir_2:
 		lea	stat_pathname(pc),a1
 		bsr	du_directory
 		lea	pathname(pc),a0
@@ -356,8 +365,8 @@ du_arg_too_long_path:
 * du_directory
 *
 * CALL
-*      (pathname)   パス名
-*      A0           (pathname)の末尾のNULのアドレス
+*      (pathname)   パス名（そのまま *.* を cat できる形であること）
+*      A0           (pathname)の末尾のアドレス（NULでなくてもよい）
 *      A1           fatchkすべきパス名
 *
 * RETURN
@@ -388,20 +397,6 @@ du_directory:
 		lea	pathname(pc),a1
 		move.l	a0,d0
 		sub.l	a1,d0
-		beq	du_directory_add_slash
-
-		cmpi.b	#':',-1(a0)
-		beq	du_directory_head_ok
-
-		cmpi.b	#'/',-1(a0)
-		beq	du_directory_head_ok
-du_directory_add_slash:
-		addq.l	#1,d0
-		cmp.l	#MAXHEAD,d0
-		bhi	du_directory_too_long_path
-
-		move.b	#'/',(a0)+
-du_directory_head_ok:
 		cmp.l	#MAXHEAD,d0
 		bhi	du_directory_too_long_path
 
@@ -532,6 +527,7 @@ du_directory_recurse:
 		bra	du_directory_next
 
 recurse_ok:
+		move.b	#'/',(a0)+
 		movea.l	a2,a1
 		bsr	du_directory			* ［再帰］
 		btst	#FLAG_s,d5
@@ -606,7 +602,7 @@ output:
 *****************************************************************
 filesize:
 		btst	#FLAG_B,d5
-		beq	truesize
+		beq	sectorsize
 
 		move.l	ST_SIZE(a1),d0
 *****************************************************************
@@ -641,7 +637,7 @@ dirsize:
 		btst	#FLAG_B,d5
 		bne	pseudosize
 *****************************************************************
-* truesize - エントリの正確なクラスタ数を求める
+* sectorsize - エントリの実際の論理セクタ数を求める
 *
 * CALL
 *      A0     パス名
@@ -650,7 +646,7 @@ dirsize:
 *      D0.L   サイズ
 *      (fatchkbuf)   破壊
 *****************************************************************
-truesize:
+sectorsize:
 		movem.l	d1-d2/a1,-(a7)
 		moveq	#0,d2
 		lea	fatchkbuf(pc),a1
@@ -694,22 +690,22 @@ fatchk_malloc_ok:
 fatchk_success:
 		moveq	#0,d1
 		tst.l	d0
-		bmi	calc_cluster_size_done
+		bmi	calc_sector_size_done
 
 		addq.l	#2,a1
-calc_cluster_size_loop:
+calc_sector_size_loop:
 		tst.l	(a1)+
-		beq	calc_cluster_size_done
+		beq	calc_sector_size_done
 
 		add.l	(a1)+,d1
-		bra	calc_cluster_size_loop
+		bra	calc_sector_size_loop
 
-calc_cluster_size_done:
+calc_sector_size_done:
 		move.l	d2,d0
-		beq	cluster_size_ok
+		beq	sector_size_ok
 
 		bsr	free
-cluster_size_ok:
+sector_size_ok:
 		move.l	d1,d0
 		movem.l	(a7)+,d1-d2/a1
 		rts
@@ -898,7 +894,7 @@ too_long_path:
 .data
 
 	dc.b	0
-	dc.b	'## du 1.1 ##  Copyright(C)1992-93 by Itagaki Fumihiko',0
+	dc.b	'## du 1.2 ##  Copyright(C)1992-94 by Itagaki Fumihiko',0
 
 **
 **  定数
@@ -911,7 +907,6 @@ msg_nofile:			dc.b	': このようなファイルやディレクトリはありません',CR,LF,0
 msg_dir_too_deep:		dc.b	': ディレクトリが深過ぎて処理できません',CR,LF,0
 msg_no_memory:			dc.b	'メモリが足りません',CR,LF,0
 msg_illegal_option:		dc.b	'不正なオプション -- ',0
-msg_bad_arg:			dc.b	'引数が正しくありません',0
 msg_bad_blocksize:		dc.b	'ブロック長の指定が正しくありません',0
 msg_too_few_args:		dc.b	'引数が足りません',0
 msg_usage:			dc.b	CR,LF
